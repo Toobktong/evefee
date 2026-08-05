@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from "react";
+import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
 
 /* ============================================================
    EVEFEE — Web Ordering Prototype
@@ -103,8 +103,8 @@ function GlobalStyle() {
       }
       @media(min-width:640px){ .ev-modal{ border-radius:20px; } }
       .ev-fab-toggle{
-        position:absolute; top:14px; right:14px; z-index:40; display:flex; gap:6px;
-        background:rgba(255,255,255,0.9); border:1px solid var(--line); border-radius:999px; padding:4px;
+        display:flex; align-items:center; gap:6px; flex-shrink:0;
+        background:rgba(255,255,255,0.9); border-bottom:1px solid var(--line); padding:8px 14px; justify-content:flex-end;
       }
       .ev-fab-toggle button{
         border:none; background:transparent; font-size:11px; font-weight:700; padding:6px 12px;
@@ -205,6 +205,13 @@ const T = {
     err_password_mismatch: "รหัสผ่านไม่ตรงกัน",
     err_required_fields: "กรุณากรอกข้อมูลให้ครบถ้วน",
     logged_in_as: "เข้าสู่ระบบในชื่อ",
+    amount_to_pay: "ยอดที่ต้องชำระ",
+    status_pending: "รอตรวจสอบสลิป",
+    payment_slip: "สลิปการชำระเงิน", attach_slip: "แนบสลิปการชำระเงิน",
+    slip_required: "กรุณาแนบสลิปการชำระเงินก่อนยืนยันสั่งซื้อ", view_slip: "ดูสลิป", no_slip: "ไม่มีสลิปแนบ",
+    approve_order: "อนุมัติ", reject_order: "ปฏิเสธ", reject_confirm: "ปฏิเสธคำสั่งซื้อนี้และยกเลิกออเดอร์?",
+    col_slip: "สลิป", pending_note: "ร้านค้ากำลังตรวจสอบสลิปการชำระเงินของคุณ กรุณารอสักครู่",
+    store_access_link: "สำหรับเจ้าของร้าน เข้าสู่ระบบที่นี่", back_to_customer_link: "กลับไปหน้าลูกค้า",
   },
   en: {
     brand: "EVEFEE", tagline: "Good day starts with EVEFEE",
@@ -269,6 +276,13 @@ const T = {
     err_password_mismatch: "Passwords do not match",
     err_required_fields: "Please fill in all fields",
     logged_in_as: "Logged in as",
+    amount_to_pay: "Amount to Pay",
+    status_pending: "Pending Slip Verification",
+    payment_slip: "Payment Slip", attach_slip: "Attach Payment Slip",
+    slip_required: "Please attach your payment slip before placing the order", view_slip: "View Slip", no_slip: "No slip attached",
+    approve_order: "Approve", reject_order: "Reject", reject_confirm: "Reject this order and mark it cancelled?",
+    col_slip: "Slip", pending_note: "The store is verifying your payment slip. Please wait a moment.",
+    store_access_link: "Store owner? Login here", back_to_customer_link: "Back to customer app",
   },
 };
 
@@ -310,6 +324,7 @@ const ADMIN_EMAIL = "manager@evefee.com";
 const ADMIN_PASS = "adminmanager";
 const STATUS_FLOW = ["received", "preparing", "ready", "completed"];
 const STATUS_COLORS = {
+  pending: "#A87B3F",
   received: "#D4A24C", preparing: "#C17A4F", ready: "#7C9A82",
   delivering: "#7C9A82", completed: "#1F3A2E", cancelled: "#B5493A",
 };
@@ -338,6 +353,26 @@ function TierBadge({ tier, t }) {
   const c = TIER_COLORS[tier] || "#999";
   return <span className="ev-status-badge" style={{ background: `${c}22`, color: c }}>{t[`tier_${tier}`]}</span>;
 }
+function computeMembersAfterOrder(members, order) {
+  const phone = (order.phone || "").trim();
+  if (!phone) return members;
+  const redeemed = Math.max(0, order.redeemedPoints || 0);
+  const earned = Math.floor(order.grandTotal / EARN_PER_BAHT);
+  const existing = members.find((m) => m.phone === phone);
+  return existing
+    ? members.map((m) => (m.phone === phone ? {
+        ...m,
+        name: order.name || m.name,
+        points: Math.max(0, m.points - redeemed + earned),
+        spent: m.spent + order.grandTotal,
+        orderCount: m.orderCount + 1,
+      } : m))
+    : [...members, {
+        phone, name: order.name || "",
+        points: Math.max(0, earned - redeemed),
+        spent: order.grandTotal, orderCount: 1, joinedAt: Date.now(),
+      }];
+}
 
 /* ---------------- Storage helpers ---------------- */
 async function loadOrSeed(key, fallback) {
@@ -350,6 +385,34 @@ async function loadOrSeed(key, fallback) {
 }
 async function saveShared(key, value) {
   try { await window.storage.set(key, JSON.stringify(value), true); } catch (e) { console.error(e); }
+}
+function resizeImageToDataUrl(file, maxDim = 500) {
+  return new Promise((resolve, reject) => {
+    if (!file || !file.type.startsWith("image/")) { reject(new Error("not an image")); return; }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        let { width, height } = img;
+        if (width > maxDim || height > maxDim) {
+          const scale = maxDim / Math.max(width, height);
+          width = Math.round(width * scale);
+          height = Math.round(height * scale);
+        }
+        const canvas = document.createElement("canvas");
+        canvas.width = width; canvas.height = height;
+        const ctx = canvas.getContext("2d");
+        ctx.fillStyle = "#fff";
+        ctx.fillRect(0, 0, width, height);
+        ctx.drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL("image/png"));
+      };
+      img.onerror = reject;
+      img.src = reader.result;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
 }
 
 /* ---------------- Cup icon (signature illustration) ---------------- */
@@ -398,6 +461,15 @@ function StatusBadge({ status, lang }) {
     </span>
   );
 }
+function SlipModal({ src, onClose }) {
+  return (
+    <div className="ev-modal-backdrop" onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()} style={{ maxWidth: 420, width: "100%" }}>
+        <img src={src} alt="Payment Slip" style={{ width: "100%", borderRadius: 12, display: "block" }} />
+      </div>
+    </div>
+  );
+}
 function CupProgress({ status, lang }) {
   const idx = STATUS_FLOW.indexOf(status);
   return (
@@ -420,7 +492,7 @@ function CupProgress({ status, lang }) {
 /* ============================================================
    CUSTOMER APP
    ============================================================ */
-function CustomerApp({ lang, menu, promotions, orders, members, setMembers, placeOrder, view, setView }) {
+function CustomerApp({ lang, menu, promotions, orders, members, setMembers, settings, placeOrder, view, setView }) {
   const t = T[lang];
   const [page, setPage] = useState("home");
   const [activeCat, setActiveCat] = useState("all");
@@ -466,7 +538,8 @@ function CustomerApp({ lang, menu, promotions, orders, members, setMembers, plac
           onAuth={(member, isNew) => {
             if (isNew) setMembers([...members, member]);
             setCurrentMember(member);
-          }} />
+          }}
+          onStoreAccess={() => setView("admin")} />
       </div>
     );
   }
@@ -488,6 +561,7 @@ function CustomerApp({ lang, menu, promotions, orders, members, setMembers, plac
         )}
         {page === "checkout" && (
           <CheckoutPage t={t} lang={lang} cart={cart} total={cartTotal} promotions={promotions} currentMember={currentMember}
+            qrImage={settings.qrImage}
             onPlace={(orderInfo) => {
               const order = placeOrder(cart, orderInfo, cartTotal);
               setLastOrderId(order.id);
@@ -794,7 +868,7 @@ function CartPage({ t, lang, cart, removeFromCart, updateQty, total, onCheckout,
   );
 }
 
-function CheckoutPage({ t, lang, cart, total, promotions, currentMember, onPlace }) {
+function CheckoutPage({ t, lang, cart, total, promotions, currentMember, qrImage, onPlace }) {
   const [fulfil, setFulfil] = useState("pickup");
   const [deliveryProvider, setDeliveryProvider] = useState("grab");
   const [when, setWhen] = useState("now");
@@ -805,7 +879,18 @@ function CheckoutPage({ t, lang, cart, total, promotions, currentMember, onPlace
   const [coupon, setCoupon] = useState(null);
   const [couponMsg, setCouponMsg] = useState("");
   const [redeemPoints, setRedeemPoints] = useState(0);
+  const [slipImage, setSlipImage] = useState(null);
   const phone = currentMember.phone;
+
+  async function handleSlipFile(e) {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    try {
+      const dataUrl = await resizeImageToDataUrl(file, 700);
+      setSlipImage(dataUrl);
+    } catch (err) { /* not a valid image, ignore */ }
+  }
 
   function applyCoupon() {
     const found = promotions.find((p) => p.code.toLowerCase() === couponInput.trim().toLowerCase());
@@ -817,7 +902,10 @@ function CheckoutPage({ t, lang, cart, total, promotions, currentMember, onPlace
   const effectiveRedeem = Math.min(redeemPoints, maxRedeemable);
   const pointsDiscount = effectiveRedeem * POINT_VALUE;
   const grandTotal = Math.max(0, total - discount - pointsDiscount);
-  const canPlace = name.trim() && (fulfil === "pickup" || address.trim());
+  const qrBlocked = payment === "qr" && !qrImage;
+  const slipRequired = payment === "qr" || payment === "transfer";
+  const slipMissing = slipRequired && !slipImage;
+  const canPlace = name.trim() && (fulfil === "pickup" || address.trim()) && !qrBlocked && !slipMissing;
 
   return (
     <div>
@@ -854,6 +942,44 @@ function CheckoutPage({ t, lang, cart, total, promotions, currentMember, onPlace
           </button>
         ))}
       </div>
+
+      <div className="ev-card" style={{ padding: 16, marginBottom: 16, textAlign: "center", background: "var(--cream)" }}>
+        <div style={{ fontSize: 11, opacity: 0.6, fontWeight: 700, marginBottom: 4 }}>{t.amount_to_pay}</div>
+        <div className="ev-display" style={{ fontSize: 26, fontWeight: 800, color: "var(--forest)" }}><Money v={grandTotal} /></div>
+        {payment === "qr" && (
+          qrImage ? (
+            <img src={qrImage} alt="QR PromptPay" style={{ maxWidth: 200, width: "100%", borderRadius: 12, marginTop: 14, border: "1px solid var(--line)" }} />
+          ) : (
+            <div style={{ fontSize: 12, color: "var(--danger)", marginTop: 12 }}>{t.qr_missing_customer}</div>
+          )
+        )}
+      </div>
+
+      {slipRequired && (
+        <div className="ev-card" style={{ padding: 14, marginBottom: 16 }}>
+          <label className="ev-label">{t.attach_slip}</label>
+          {slipImage ? (
+            <div>
+              <img src={slipImage} alt="Payment Slip" style={{ width: "100%", maxWidth: 220, borderRadius: 12, marginBottom: 10, border: "1px solid var(--line)" }} />
+              <div style={{ display: "flex", gap: 8 }}>
+                <label className="ev-btn ev-btn-outline" style={{ flex: 1, textAlign: "center", cursor: "pointer", fontSize: 12 }}>
+                  {t.attach_slip}
+                  <input type="file" accept="image/*" onChange={handleSlipFile} style={{ display: "none" }} />
+                </label>
+                <button className="ev-btn ev-btn-ghost" style={{ color: "var(--danger)", fontSize: 12 }} onClick={() => setSlipImage(null)}>{t.delete}</button>
+              </div>
+            </div>
+          ) : (
+            <>
+              <label className="ev-btn ev-btn-primary" style={{ width: "100%", textAlign: "center", cursor: "pointer", display: "block" }}>
+                {t.attach_slip}
+                <input type="file" accept="image/*" onChange={handleSlipFile} style={{ display: "none" }} />
+              </label>
+              <div style={{ fontSize: 11.5, color: "var(--danger)", marginTop: 8 }}>{t.slip_required}</div>
+            </>
+          )}
+        </div>
+      )}
 
       <label className="ev-label">{t.name}</label>
       <input className="ev-input" value={name} onChange={(e) => setName(e.target.value)} style={{ marginBottom: 12 }} />
@@ -908,6 +1034,7 @@ function CheckoutPage({ t, lang, cart, total, promotions, currentMember, onPlace
             fulfil, deliveryProvider, when, payment, name, phone, address,
             coupon: coupon ? coupon.code : null, discount,
             redeemedPoints: effectiveRedeem, pointsDiscount, grandTotal,
+            slip: slipImage,
           })}>
           {t.place_order}
         </button>
@@ -940,6 +1067,11 @@ function TrackingPage({ t, lang, orders, initialId, setPage }) {
             </div>
             <StatusBadge status={order.status} lang={lang} />
           </div>
+          {order.status === "pending" && (
+            <div style={{ fontSize: 12, color: "var(--terracotta)", background: "rgba(193,122,79,0.1)", borderRadius: 10, padding: "10px 12px", marginTop: 12 }}>
+              {t.pending_note}
+            </div>
+          )}
           <CupProgress status={order.status} lang={lang} />
           <div style={{ borderTop: "1px solid var(--line)", paddingTop: 10 }}>
             {order.items.map((it, i) => (
@@ -984,7 +1116,7 @@ function HistoryPage({ t, lang, orders, currentMember, onReorder }) {
   );
 }
 
-function MemberAuthPage({ t, members, onAuth }) {
+function MemberAuthPage({ t, members, onAuth, onStoreAccess }) {
   const [mode, setMode] = useState("login");
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
@@ -1046,6 +1178,16 @@ function MemberAuthPage({ t, members, onAuth }) {
         <button className="ev-btn ev-btn-primary" style={{ width: "100%" }} onClick={submit}>
           {mode === "login" ? t.login_btn : t.signup_btn}
         </button>
+
+        {onStoreAccess && (
+          <div style={{ textAlign: "center", marginTop: 16 }}>
+            <button onClick={onStoreAccess} style={{
+              background: "none", border: "none", cursor: "pointer", fontSize: 11.5, opacity: 0.5, textDecoration: "underline",
+            }}>
+              {t.store_access_link}
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1106,17 +1248,17 @@ function MemberPage({ t, lang, member }) {
 /* ============================================================
    ADMIN APP
    ============================================================ */
-function AdminApp({ lang, menu, setMenu, promotions, setPromotions, orders, setOrders, members, updateOrderStatus }) {
+function AdminApp({ lang, menu, setMenu, promotions, setPromotions, orders, setOrders, members, settings, setSettings, updateOrderStatus, setView }) {
   const t = T[lang];
   const [authed, setAuthed] = useState(false);
   const [tab, setTab] = useState("dashboard");
 
-  if (!authed) return <AdminLogin t={t} onLogin={() => setAuthed(true)} />;
+  if (!authed) return <AdminLogin t={t} onLogin={() => setAuthed(true)} onBack={() => setView("customer")} />;
 
   const navItems = [
     ["dashboard", t.nav_dashboard, "📊"], ["orders", t.nav_orders, "🧾"], ["kitchen", t.nav_kitchen, "☕"],
     ["menu", t.nav_menu_mgmt, "📋"], ["promo", t.nav_promo, "🏷️"], ["members", t.nav_members, "👤"],
-    ["reports", t.nav_reports, "📈"],
+    ["settings", t.nav_settings, "⚙️"], ["reports", t.nav_reports, "📈"],
   ];
 
   return (
@@ -1129,7 +1271,7 @@ function AdminApp({ lang, menu, setMenu, promotions, setPromotions, orders, setO
             <button key={key} className={tab === key ? "active" : ""} onClick={() => setTab(key)}>{icon} &nbsp;{label}</button>
           ))}
         </div>
-        <button onClick={() => setAuthed(false)} style={{ color: "rgba(246,241,230,0.6)" }}>↩ {t.logout}</button>
+        <button onClick={() => { setAuthed(false); setView("customer"); }} style={{ color: "rgba(246,241,230,0.6)" }}>↩ {t.logout}</button>
       </div>
       <div className="ev-scroll" style={{ flex: 1, padding: 22 }}>
         {tab === "dashboard" && <DashboardTab t={t} lang={lang} orders={orders} menu={menu} />}
@@ -1138,13 +1280,14 @@ function AdminApp({ lang, menu, setMenu, promotions, setPromotions, orders, setO
         {tab === "menu" && <MenuMgmtTab t={t} lang={lang} menu={menu} setMenu={setMenu} />}
         {tab === "promo" && <PromoTab t={t} lang={lang} promotions={promotions} setPromotions={setPromotions} />}
         {tab === "members" && <MembersTab t={t} lang={lang} members={members} />}
+        {tab === "settings" && <SettingsTab t={t} lang={lang} settings={settings} setSettings={setSettings} />}
         {tab === "reports" && <ReportsTab t={t} lang={lang} orders={orders} />}
       </div>
     </div>
   );
 }
 
-function AdminLogin({ t, onLogin }) {
+function AdminLogin({ t, onLogin, onBack }) {
   const [email, setEmail] = useState("");
   const [pass, setPass] = useState("");
   const [err, setErr] = useState("");
@@ -1166,6 +1309,15 @@ function AdminLogin({ t, onLogin }) {
         <input className="ev-input" type="password" value={pass} onChange={(e) => setPass(e.target.value)} onKeyDown={handleKeyDown} style={{ marginBottom: 12 }} />
         {err && <div style={{ color: "var(--danger)", fontSize: 12, marginBottom: 10 }}>{err}</div>}
         <button className="ev-btn ev-btn-primary" style={{ width: "100%" }} onClick={submit}>{t.login}</button>
+        {onBack && (
+          <div style={{ textAlign: "center", marginTop: 16 }}>
+            <button onClick={onBack} style={{
+              background: "none", border: "none", cursor: "pointer", fontSize: 11.5, opacity: 0.5, textDecoration: "underline",
+            }}>
+              {t.back_to_customer_link}
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1173,7 +1325,7 @@ function AdminLogin({ t, onLogin }) {
 
 function statsFor(orders) {
   const today = new Date().toDateString();
-  const todays = orders.filter((o) => new Date(o.createdAt).toDateString() === today && o.status !== "cancelled");
+  const todays = orders.filter((o) => new Date(o.createdAt).toDateString() === today && o.status !== "cancelled" && o.status !== "pending");
   const sales = todays.reduce((s, o) => s + o.grandTotal, 0);
   const itemCounts = {};
   todays.forEach((o) => o.items.forEach((it) => { itemCounts[it.nameEn] = (itemCounts[it.nameEn] || 0) + it.qty; }));
@@ -1189,7 +1341,7 @@ function DashboardTab({ t, lang, orders, menu }) {
     [t.dash_top_item, s.top], [t.dash_new_cust, s.customers],
   ];
   const catSales = {};
-  orders.filter((o) => o.status !== "cancelled").forEach((o) => o.items.forEach((it) => {
+  orders.filter((o) => o.status !== "cancelled" && o.status !== "pending").forEach((o) => o.items.forEach((it) => {
     const m = menu.find((mi) => mi.id === it.itemId);
     const cat = m ? m.cat : "other";
     catSales[cat] = (catSales[cat] || 0) + it.lineTotal;
@@ -1226,6 +1378,13 @@ function DashboardTab({ t, lang, orders, menu }) {
 
 function OrdersTab({ t, lang, orders, updateOrderStatus }) {
   const sorted = [...orders].sort((a, b) => b.createdAt - a.createdAt);
+  const [viewSlip, setViewSlip] = useState(null);
+  const ALL_STATUSES = ["pending", ...STATUS_FLOW, "cancelled"];
+
+  function reject(id) {
+    if (window.confirm(t.reject_confirm)) updateOrderStatus(id, "cancelled");
+  }
+
   return (
     <div>
       <SectionTitle icon="🧾">{t.order_mgmt_title}</SectionTitle>
@@ -1233,28 +1392,44 @@ function OrdersTab({ t, lang, orders, updateOrderStatus }) {
         <table className="ev-table">
           <thead><tr>
             <th>{t.col_order}</th><th>{t.col_time}</th><th>{t.col_customer}</th><th>{t.col_items}</th>
-            <th>{t.col_total}</th><th>{t.col_status}</th><th>{t.col_action}</th>
+            <th>{t.col_total}</th><th>{t.col_slip}</th><th>{t.col_status}</th><th>{t.col_action}</th>
           </tr></thead>
           <tbody>
             {sorted.map((o) => (
-              <tr key={o.id}>
+              <tr key={o.id} style={o.status === "pending" ? { background: "rgba(168,123,63,0.08)" } : undefined}>
                 <td style={{ fontWeight: 700 }}>{o.id}</td>
                 <td>{new Date(o.createdAt).toLocaleTimeString(lang === "th" ? "th-TH" : "en-US", { hour: "2-digit", minute: "2-digit" })}</td>
                 <td>{o.name}</td>
                 <td>{o.items.length} {t.items}</td>
                 <td><Money v={o.grandTotal} /></td>
+                <td>
+                  {o.slip ? (
+                    <img src={o.slip} alt="slip" onClick={() => setViewSlip(o.slip)}
+                      style={{ width: 38, height: 38, objectFit: "cover", borderRadius: 6, cursor: "pointer", border: "1px solid var(--line)" }} />
+                  ) : (
+                    <span style={{ fontSize: 11, opacity: 0.4 }}>{t.no_slip}</span>
+                  )}
+                </td>
                 <td><StatusBadge status={o.status} lang={lang} /></td>
                 <td>
-                  <select className="ev-input" style={{ padding: "5px 8px", fontSize: 12 }} value={o.status}
-                    onChange={(e) => updateOrderStatus(o.id, e.target.value)}>
-                    {[...STATUS_FLOW, "cancelled"].map((s) => <option key={s} value={s}>{t[`status_${s}`]}</option>)}
-                  </select>
+                  {o.status === "pending" ? (
+                    <div style={{ display: "flex", gap: 6 }}>
+                      <button className="ev-btn ev-btn-primary" style={{ fontSize: 11.5, padding: "5px 10px" }} onClick={() => updateOrderStatus(o.id, "received")}>{t.approve_order}</button>
+                      <button className="ev-btn ev-btn-ghost" style={{ fontSize: 11.5, padding: "5px 10px", color: "var(--danger)" }} onClick={() => reject(o.id)}>{t.reject_order}</button>
+                    </div>
+                  ) : (
+                    <select className="ev-input" style={{ padding: "5px 8px", fontSize: 12 }} value={o.status}
+                      onChange={(e) => updateOrderStatus(o.id, e.target.value)}>
+                      {ALL_STATUSES.map((s) => <option key={s} value={s}>{t[`status_${s}`]}</option>)}
+                    </select>
+                  )}
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
+      {viewSlip && <SlipModal src={viewSlip} onClose={() => setViewSlip(null)} />}
     </div>
   );
 }
@@ -1495,8 +1670,54 @@ function MembersTab({ t, lang, members }) {
   );
 }
 
+function SettingsTab({ t, lang, settings, setSettings }) {
+  async function handleFile(e) {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = ""; // allow re-selecting the same file later
+    if (!file) return;
+    try {
+      const dataUrl = await resizeImageToDataUrl(file, 500);
+      setSettings({ ...settings, qrImage: dataUrl });
+    } catch (err) { /* not a valid image, ignore */ }
+  }
+
+  function removeQr() {
+    if (!window.confirm(t.confirm_delete)) return;
+    setSettings({ ...settings, qrImage: null });
+  }
+
+  return (
+    <div>
+      <SectionTitle icon="⚙️">{t.qr_settings_title}</SectionTitle>
+      <div className="ev-card" style={{ padding: 20, maxWidth: 360 }}>
+        {settings.qrImage ? (
+          <>
+            <div style={{ fontSize: 11, opacity: 0.6, fontWeight: 700, marginBottom: 8 }}>{t.qr_current}</div>
+            <img src={settings.qrImage} alt="QR PromptPay" style={{ width: "100%", borderRadius: 12, marginBottom: 14, border: "1px solid var(--line)" }} />
+            <div style={{ display: "flex", gap: 8 }}>
+              <label className="ev-btn ev-btn-outline" style={{ flex: 1, textAlign: "center", cursor: "pointer" }}>
+                {t.qr_upload_label}
+                <input type="file" accept="image/*" onChange={handleFile} style={{ display: "none" }} />
+              </label>
+              <button className="ev-btn ev-btn-ghost" style={{ color: "var(--danger)" }} onClick={removeQr}>{t.qr_remove}</button>
+            </div>
+          </>
+        ) : (
+          <>
+            <div style={{ textAlign: "center", padding: "30px 0", opacity: 0.5, fontSize: 13 }}>{t.qr_none_admin}</div>
+            <label className="ev-btn ev-btn-primary" style={{ width: "100%", textAlign: "center", cursor: "pointer", display: "block" }}>
+              {t.qr_upload_label}
+              <input type="file" accept="image/*" onChange={handleFile} style={{ display: "none" }} />
+            </label>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function ReportsTab({ t, lang, orders }) {
-  const valid = orders.filter((o) => o.status !== "cancelled");
+  const valid = orders.filter((o) => o.status !== "cancelled" && o.status !== "pending");
   const totalSales = valid.reduce((s, o) => s + o.grandTotal, 0);
   const avg = valid.length ? totalSales / valid.length : 0;
   const itemCounts = {};
@@ -1553,16 +1774,18 @@ export default function EvefeeApp() {
   const [promotions, setPromotionsState] = useState(DEFAULT_PROMOTIONS);
   const [orders, setOrdersState] = useState([]);
   const [members, setMembersState] = useState([]);
+  const [settings, setSettingsState] = useState({ qrImage: null });
 
   useEffect(() => {
     (async () => {
-      const [m, p, o, mem] = await Promise.all([
+      const [m, p, o, mem, s] = await Promise.all([
         loadOrSeed("evefee:menu", DEFAULT_MENU),
         loadOrSeed("evefee:promotions", DEFAULT_PROMOTIONS),
         loadOrSeed("evefee:orders", []),
         loadOrSeed("evefee:members", []),
+        loadOrSeed("evefee:settings", { qrImage: null }),
       ]);
-      setMenuState(m); setPromotionsState(p); setOrdersState(o); setMembersState(mem);
+      setMenuState(m); setPromotionsState(p); setOrdersState(o); setMembersState(mem); setSettingsState(s);
       setLoading(false);
     })();
   }, []);
@@ -1571,44 +1794,35 @@ export default function EvefeeApp() {
   const setPromotions = useCallback((next) => { setPromotionsState(next); saveShared("evefee:promotions", next); }, []);
   const setOrders = useCallback((next) => { setOrdersState(next); saveShared("evefee:orders", next); }, []);
   const setMembers = useCallback((next) => { setMembersState(next); saveShared("evefee:members", next); }, []);
+  const setSettings = useCallback((next) => { setSettingsState(next); saveShared("evefee:settings", next); }, []);
 
   const placeOrder = useCallback((cart, info, subtotal) => {
     const id = "A" + String(100 + orders.length + Math.floor(Math.random() * 50)).padStart(3, "0");
+    const requiresVerification = info.payment === "qr" || info.payment === "transfer";
     const order = {
-      id, createdAt: Date.now(), status: "received",
+      id, createdAt: Date.now(), status: requiresVerification ? "pending" : "received",
       items: cart, subtotal, ...info,
       grandTotal: info.grandTotal != null ? info.grandTotal : subtotal,
     };
     const next = [...orders, order];
     setOrders(next);
 
-    // Membership: earn points on the final paid amount, redeem points already chosen at checkout.
-    const phone = (info.phone || "").trim();
-    if (phone) {
-      const redeemed = Math.max(0, info.redeemedPoints || 0);
-      const earned = Math.floor(order.grandTotal / EARN_PER_BAHT);
-      const existing = members.find((m) => m.phone === phone);
-      const nextMembers = existing
-        ? members.map((m) => (m.phone === phone ? {
-            ...m,
-            name: info.name || m.name,
-            points: Math.max(0, m.points - redeemed + earned),
-            spent: m.spent + order.grandTotal,
-            orderCount: m.orderCount + 1,
-          } : m))
-        : [...members, {
-            phone, name: info.name || "",
-            points: Math.max(0, earned - redeemed),
-            spent: order.grandTotal, orderCount: 1, joinedAt: Date.now(),
-          }];
-      setMembers(nextMembers);
+    // Membership points are only credited once the payment is confirmed. Cash/card orders are
+    // confirmed immediately; QR/transfer orders wait until an admin approves the attached slip
+    // (see updateOrderStatus), so a rejected order never grants points.
+    if (!requiresVerification) {
+      setMembers(computeMembersAfterOrder(members, order));
     }
     return order;
   }, [orders, setOrders, members, setMembers]);
 
   const updateOrderStatus = useCallback((id, status) => {
+    const order = orders.find((o) => o.id === id);
     setOrders(orders.map((o) => (o.id === id ? { ...o, status } : o)));
-  }, [orders, setOrders]);
+    if (order && order.status === "pending" && status === "received") {
+      setMembers(computeMembersAfterOrder(members, order));
+    }
+  }, [orders, setOrders, members, setMembers]);
 
   const resetDemo = useCallback(() => {
     if (!window.confirm(T[lang].reset_confirm)) return;
@@ -1628,19 +1842,21 @@ export default function EvefeeApp() {
   return (
     <div className="evefee-root" style={{ height: 700, display: "flex", flexDirection: "column" }}>
       <GlobalStyle />
-      <div className="ev-fab-toggle">
-        <button className={lang === "th" ? "active" : ""} onClick={() => setLang("th")}>TH</button>
-        <button className={lang === "en" ? "active" : ""} onClick={() => setLang("en")}>EN</button>
-        <span style={{ width: 1, background: "var(--line)", margin: "2px 2px" }} />
-        <button className={view === "customer" ? "active" : ""} onClick={() => setView("customer")}>{T[lang].customer_view}</button>
-        <button className={view === "admin" ? "active" : ""} onClick={() => setView("admin")}>{T[lang].admin_view}</button>
+      <div className="ev-fab-toggle" style={{ justifyContent: "space-between" }}>
+        <span style={{ fontWeight: 800, fontSize: 13, color: "var(--forest)", letterSpacing: "0.04em" }}>EVEFEE</span>
+        <div style={{ display: "flex", gap: 4, background: "var(--cream)", border: "1px solid var(--line)", borderRadius: 999, padding: 3 }}>
+          <button className={lang === "th" ? "active" : ""} onClick={() => setLang("th")}>TH</button>
+          <button className={lang === "en" ? "active" : ""} onClick={() => setLang("en")}>EN</button>
+        </div>
       </div>
       <div style={{ flex: 1, overflow: "hidden" }}>
         {view === "customer" ? (
-          <CustomerApp lang={lang} menu={menu} promotions={promotions} orders={orders} members={members} setMembers={setMembers} placeOrder={placeOrder} view={view} setView={setView} />
+          <CustomerApp lang={lang} menu={menu} promotions={promotions} orders={orders} members={members} setMembers={setMembers}
+            settings={settings} placeOrder={placeOrder} view={view} setView={setView} />
         ) : (
           <AdminApp lang={lang} menu={menu} setMenu={setMenu} promotions={promotions} setPromotions={setPromotions}
-            orders={orders} setOrders={setOrders} members={members} updateOrderStatus={updateOrderStatus} />
+            orders={orders} setOrders={setOrders} members={members} settings={settings} setSettings={setSettings}
+            updateOrderStatus={updateOrderStatus} setView={setView} />
         )}
       </div>
     </div>
